@@ -1,0 +1,590 @@
+name: Build Automatic Debt Payoff App
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  create-test-and-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Prevent accidental overwrite
+        run: |
+          if [ -f package.json ]; then
+            echo "An app project already exists."
+            echo "Stopping to protect existing project files."
+            exit 1
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Preserve existing README
+        run: cp README.md /tmp/original-readme.md
+
+      - name: Create Expo application
+        run: npx --yes create-expo-app@latest generated-app --template blank-typescript
+
+      - name: Install dependencies
+        working-directory: generated-app
+        run: |
+          npm install
+          npm install @react-native-async-storage/async-storage
+          npm install react-dom react-native-web @expo/metro-runtime
+          npm install --save-dev tsx
+
+      - name: Create debt calculator
+        working-directory: generated-app
+        run: |
+          mkdir -p src tests
+
+          cat > src/debtCalculator.ts <<'EOF'
+          export type Debt = {
+            id: string;
+            name: string;
+            balance: number;
+            apr: number;
+            minimumPayment: number;
+          };
+
+          export type PayoffResult = {
+            months: number;
+            totalInterest: number;
+            totalPaid: number;
+            debtFreeDate: string;
+          };
+
+          export function calculatePayoff(
+            startingDebts: Debt[],
+            extraPayment: number,
+            strategy: "snowball" | "avalanche"
+          ): PayoffResult {
+            if (!Number.isFinite(extraPayment) || extraPayment < 0) {
+              throw new Error("Extra payment must be a nonnegative number.");
+            }
+
+            for (const debt of startingDebts) {
+              if (
+                !Number.isFinite(debt.balance) ||
+                debt.balance < 0 ||
+                !Number.isFinite(debt.apr) ||
+                debt.apr < 0 ||
+                !Number.isFinite(debt.minimumPayment) ||
+                debt.minimumPayment < 0
+              ) {
+                throw new Error("Check the debt balances, APRs, and payments.");
+              }
+
+              if (debt.balance > 0 && debt.minimumPayment <= 0) {
+                throw new Error(
+                  "Every debt with a balance needs a minimum payment greater than zero."
+                );
+              }
+            }
+
+            const debts = startingDebts
+              .map((debt) => ({
+                ...debt,
+                balance: Math.round(debt.balance * 100) / 100,
+                minimumPayment:
+                  Math.round(debt.minimumPayment * 100) / 100,
+              }))
+              .filter((debt) => debt.balance > 0);
+
+            if (debts.length === 0) {
+              return {
+                months: 0,
+                totalInterest: 0,
+                totalPaid: 0,
+                debtFreeDate: new Date().toLocaleDateString("en-US", {
+                  month: "long",
+                  year: "numeric",
+                }),
+              };
+            }
+
+            const monthlyBudget =
+              debts.reduce(
+                (sum, debt) => sum + debt.minimumPayment,
+                0
+              ) + extraPayment;
+
+            if (monthlyBudget <= 0) {
+              throw new Error("Your monthly payment must be greater than zero.");
+            }
+
+            let totalInterest = 0;
+            let totalPaid = 0;
+            let months = 0;
+
+            while (debts.some((debt) => debt.balance > 0.005)) {
+              if (months >= 1200) {
+                throw new Error(
+                  "The debt cannot be paid off within the 100-year calculation limit."
+                );
+              }
+
+              months++;
+
+              const previousBalance = debts.reduce(
+                (sum, debt) => sum + debt.balance,
+                0
+              );
+
+              // Accrue estimated monthly interest.
+              for (const debt of debts) {
+                if (debt.balance <= 0.005) continue;
+
+                const interest =
+                  Math.round(
+                    debt.balance * (debt.apr / 100 / 12) * 100
+                  ) / 100;
+
+                debt.balance += interest;
+                totalInterest += interest;
+              }
+
+              let budget = monthlyBudget;
+
+              // Pay each debt's minimum payment first.
+              for (const debt of debts) {
+                if (debt.balance <= 0.005) continue;
+
+                const payment = Math.min(
+                  debt.balance,
+                  debt.minimumPayment,
+                  budget
+                );
+
+                debt.balance =
+                  Math.round((debt.balance - payment) * 100) / 100;
+
+                budget = Math.round((budget - payment) * 100) / 100;
+                totalPaid += payment;
+              }
+
+              // Apply all remaining money to the selected target debt.
+              while (budget > 0.005) {
+                const remaining = debts.filter(
+                  (debt) => debt.balance > 0.005
+                );
+
+                if (remaining.length === 0) break;
+
+                remaining.sort((a, b) => {
+                  if (strategy === "snowball") {
+                    return a.balance - b.balance || b.apr - a.apr;
+                  }
+
+                  return b.apr - a.apr || a.balance - b.balance;
+                });
+
+                const target = remaining[0];
+                const payment = Math.min(target.balance, budget);
+
+                target.balance =
+                  Math.round((target.balance - payment) * 100) / 100;
+
+                budget = Math.round((budget - payment) * 100) / 100;
+                totalPaid += payment;
+              }
+
+              const currentBalance = debts.reduce(
+                (sum, debt) => sum + debt.balance,
+                0
+              );
+
+              if (
+                currentBalance >= previousBalance - 0.005 &&
+                currentBalance > 0.005
+              ) {
+                throw new Error(
+                  "Your payments may not cover the interest. Increase your monthly payment."
+                );
+              }
+            }
+
+            const debtFreeDate = new Date();
+            debtFreeDate.setDate(1);
+            debtFreeDate.setMonth(debtFreeDate.getMonth() + months);
+
+            return {
+              months,
+              totalInterest: Math.round(totalInterest * 100) / 100,
+              totalPaid: Math.round(totalPaid * 100) / 100,
+              debtFreeDate: debtFreeDate.toLocaleDateString("en-US", {
+                month: "long",
+                year: "numeric",
+              }),
+            };
+          }
+          EOF
+
+      - name: Create calculator tests
+        working-directory: generated-app
+        run: |
+          cat > tests/debtCalculator.test.ts <<'EOF'
+          import test from "node:test";
+          import assert from "node:assert/strict";
+          import { calculatePayoff, Debt } from "../src/debtCalculator";
+
+          const sampleDebt: Debt = {
+            id: "1",
+            name: "Credit Card",
+            balance: 1000,
+            apr: 0,
+            minimumPayment: 100,
+          };
+
+          test("calculates payoff with no interest", () => {
+            const result = calculatePayoff([sampleDebt], 0, "avalanche");
+
+            assert.equal(result.months, 10);
+            assert.equal(result.totalInterest, 0);
+            assert.equal(result.totalPaid, 1000);
+          });
+
+          test("extra payments shorten payoff time", () => {
+            const normal = calculatePayoff([sampleDebt], 0, "avalanche");
+            const extra = calculatePayoff([sampleDebt], 100, "avalanche");
+
+            assert.ok(extra.months < normal.months);
+            assert.equal(extra.months, 5);
+          });
+
+          test("zero debt returns zero months", () => {
+            const result = calculatePayoff([], 50, "snowball");
+
+            assert.equal(result.months, 0);
+            assert.equal(result.totalInterest, 0);
+            assert.equal(result.totalPaid, 0);
+          });
+
+          test("rejects negative extra payments", () => {
+            assert.throws(
+              () => calculatePayoff([sampleDebt], -10, "snowball"),
+              /nonnegative/
+            );
+          });
+
+          test("rejects debts without a minimum payment", () => {
+            assert.throws(
+              () =>
+                calculatePayoff(
+                  [{ ...sampleDebt, minimumPayment: 0 }],
+                  0,
+                  "avalanche"
+                ),
+              /minimum payment/
+            );
+          });
+
+          test("avalanche and snowball both pay off debts", () => {
+            const debts: Debt[] = [
+              {
+                id: "1",
+                name: "Small balance",
+                balance: 300,
+                apr: 8,
+                minimumPayment: 30,
+              },
+              {
+                id: "2",
+                name: "High interest",
+                balance: 1200,
+                apr: 24,
+                minimumPayment: 50,
+              },
+            ];
+
+            const avalanche = calculatePayoff(debts, 50, "avalanche");
+            const snowball = calculatePayoff(debts, 50, "snowball");
+
+            assert.ok(avalanche.months > 0);
+            assert.ok(snowball.months > 0);
+            assert.ok(avalanche.totalInterest >= 0);
+            assert.ok(snowball.totalInterest >= 0);
+          });
+          EOF
+
+      - name: Create application interface
+        working-directory: generated-app
+        run: |
+          cat > App.tsx <<'EOF'
+          import React, { useEffect, useState } from "react";
+          import {
+            Alert,
+            SafeAreaView,
+            ScrollView,
+            StyleSheet,
+            Text,
+            TextInput,
+            TouchableOpacity,
+            View,
+          } from "react-native";
+          import AsyncStorage from "@react-native-async-storage/async-storage";
+          import { calculatePayoff, Debt } from "./src/debtCalculator";
+
+          export default function App() {
+            const [debts, setDebts] = useState<Debt[]>([]);
+            const [name, setName] = useState("");
+            const [balance, setBalance] = useState("");
+            const [apr, setApr] = useState("");
+            const [minimum, setMinimum] = useState("");
+            const [extra, setExtra] = useState("50");
+            const [strategy, setStrategy] =
+              useState<"snowball" | "avalanche">("avalanche");
+            const [loaded, setLoaded] = useState(false);
+
+            useEffect(() => {
+              AsyncStorage.getItem("automatic-debt-payoff-debts")
+                .then((saved) => {
+                  if (saved) {
+                    try {
+                      const parsed = JSON.parse(saved);
+                      if (Array.isArray(parsed)) setDebts(parsed);
+                    } catch {
+                      // Ignore invalid saved data.
+                    }
+                  }
+                })
+                .catch(() => {})
+                .finally(() => setLoaded(true));
+            }, []);
+
+            useEffect(() => {
+              if (loaded) {
+                AsyncStorage.setItem(
+                  "automatic-debt-payoff-debts",
+                  JSON.stringify(debts)
+                ).catch(() => {});
+              }
+            }, [debts, loaded]);
+
+            const money = (amount: number) =>
+              amount.toLocaleString("en-US", {
+                style: "currency",
+                currency: "USD",
+              });
+
+            const totalDebt = debts.reduce(
+              (sum, debt) => sum + debt.balance,
+              0
+            );
+
+            const totalMinimum = debts.reduce(
+              (sum, debt) => sum + debt.minimumPayment,
+              0
+            );
+
+            let result: ReturnType<typeof calculatePayoff> | null = null;
+            let error = "";
+
+            try {
+              if (debts.length) {
+                const extraAmount = Number(extra);
+
+                if (!Number.isFinite(extraAmount) || extraAmount < 0) {
+                  throw new Error("Enter a valid nonnegative extra payment.");
+                }
+
+                result = calculatePayoff(debts, extraAmount, strategy);
+              }
+            } catch (err) {
+              error =
+                err instanceof Error
+                  ? err.message
+                  : "Unable to calculate your payoff plan.";
+            }
+
+            function addDebt() {
+              const b = Number(balance);
+              const a = Number(apr);
+              const m = Number(minimum);
+
+              if (
+                !name.trim() ||
+                !balance.trim() ||
+                !apr.trim() ||
+                !minimum.trim()
+              ) {
+                Alert.alert("Missing information", "Complete every field.");
+                return;
+              }
+
+              if (
+                !Number.isFinite(b) || b <= 0 ||
+                !Number.isFinite(a) || a < 0 ||
+                !Number.isFinite(m) || m <= 0
+              ) {
+                Alert.alert(
+                  "Check your numbers",
+                  "Balance and payment must be positive. APR cannot be negative."
+                );
+                return;
+              }
+
+              setDebts((current) => [
+                ...current,
+                {
+                  id: `${Date.now()}-${Math.random()}`,
+                  name: name.trim(),
+                  balance: b,
+                  apr: a,
+                  minimumPayment: m,
+                },
+              ]);
+
+              setName("");
+              setBalance("");
+              setApr("");
+              setMinimum("");
+            }
+
+            return (
+              <SafeAreaView style={styles.safe}>
+                <ScrollView contentContainerStyle={styles.container}>
+                  <Text style={styles.brand}>YOUR PATH TO FINANCIAL FREEDOM</Text>
+                  <Text style={styles.title}>Automatic Debt Payoff</Text>
+                  <Text style={styles.subtitle}>
+                    One clear plan. One step closer to debt-free.
+                  </Text>
+
+                  <View style={styles.hero}>
+                    <Text style={styles.label}>TOTAL DEBT REMAINING</Text>
+                    <Text style={styles.total}>{money(totalDebt)}</Text>
+                    <Text style={styles.small}>
+                      Monthly minimums: {money(totalMinimum)}
+                    </Text>
+                  </View>
+
+                  <Text style={styles.heading}>Choose your strategy</Text>
+                  <View style={styles.row}>
+                    <TouchableOpacity
+                      style={[
+                        styles.choice,
+                        strategy === "avalanche" && styles.selected,
+                      ]}
+                      onPress={() => setStrategy("avalanche")}
+                    >
+                      <Text style={styles.choiceTitle}>Avalanche</Text>
+                      <Text style={styles.choiceSub}>Highest APR first</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[
+                        styles.choice,
+                        strategy === "snowball" && styles.selected,
+                      ]}
+                      onPress={() => setStrategy("snowball")}
+                    >
+                      <Text style={styles.choiceTitle}>Snowball</Text>
+                      <Text style={styles.choiceSub}>Smallest balance first</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  <Text style={styles.heading}>Extra monthly payment</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={extra}
+                    onChangeText={setExtra}
+                    keyboardType="decimal-pad"
+                    placeholder="Extra payment in dollars"
+                  />
+
+                  {result && (
+                    <View style={styles.result}>
+                      <Text style={styles.resultHeading}>
+                        YOUR ESTIMATED PAYOFF
+                      </Text>
+                      <Text style={styles.resultNumber}>
+                        {result.months} months
+                      </Text>
+                      <Text style={styles.resultText}>
+                        Debt-free around {result.debtFreeDate}
+                      </Text>
+                      <Text style={styles.resultText}>
+                        Estimated interest: {money(result.totalInterest)}
+                      </Text>
+                      <Text style={styles.resultText}>
+                        Estimated total paid: {money(result.totalPaid)}
+                      </Text>
+                    </View>
+                  )}
+
+                  {!!error && <Text style={styles.error}>{error}</Text>}
+
+                  <Text style={styles.heading}>Add a debt</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={name}
+                    onChangeText={setName}
+                    placeholder="Debt name"
+                  />
+                  <TextInput
+                    style={styles.input}
+                    value={balance}
+                    onChangeText={setBalance}
+                    keyboardType="decimal-pad"
+                    placeholder="Current balance ($)"
+                  />
+                  <TextInput
+                    style={styles.input}
+                    value={apr}
+                    onChangeText={setApr}
+                    keyboardType="decimal-pad"
+                    placeholder="Interest rate APR (%)"
+                  />
+                  <TextInput
+                    style={styles.input}
+                    value={minimum}
+                    onChangeText={setMinimum}
+                    keyboardType="decimal-pad"
+                    placeholder="Minimum monthly payment ($)"
+                  />
+
+                  <TouchableOpacity style={styles.button} onPress={addDebt}>
+                    <Text style={styles.buttonText}>+ Add Debt</Text>
+                  </TouchableOpacity>
+
+                  <Text style={styles.heading}>Your debts ({debts.length})</Text>
+
+                  {debts.map((debt) => (
+                    <View key={debt.id} style={styles.debtCard}>
+                      <View style={styles.debtInfo}>
+                        <Text style={styles.debtName}>{debt.name}</Text>
+                        <Text style={styles.debtDetails}>
+                          {debt.apr}% APR · Minimum{" "}
+                          {money(debt.minimumPayment)}/mo
+                        </Text>
+                        <Text style={styles.debtBalance}>
+                          {money(debt.balance)}
+                        </Text>
+                      </View>
+
+                      <TouchableOpacity
+                        onPress={() =>
+                          Alert.alert("Remove debt?", `Remove ${debt.name}?`, [
+                            { text: "Cancel", style: "cancel" },
+                            {
+                              text: "Remove",
+                              style: "destructive",
+                              onPress: () =>
+                                setDebts((current) =>
+                                  current.filter((item) => item.id !== debt.id)
+                                ),
+                            },
+                          ])
+                        }
+                      >
+   
