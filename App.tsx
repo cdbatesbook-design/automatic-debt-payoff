@@ -19,6 +19,8 @@ import {
 } from "./src/debtCalculator";
 
 type AccountType = "Checking" | "Savings" | "Cash";
+type TransactionType = "Deposit" | "Expense" | "Payment";
+type Screen = "dashboard" | "debts" | "accounts" | "checkbook" | "agreement";
 
 type Account = {
   id: string;
@@ -26,8 +28,6 @@ type Account = {
   type: AccountType;
   openingBalance: number;
 };
-
-type TransactionType = "Deposit" | "Expense" | "Payment";
 
 type Transaction = {
   id: string;
@@ -38,13 +38,6 @@ type Transaction = {
   date: string;
 };
 
-type Screen =
-  | "dashboard"
-  | "debts"
-  | "accounts"
-  | "checkbook"
-  | "agreement";
-
 const DEBT_KEY = "debt-payoff-data-v1";
 const URL_KEY = "debt-payoff-backend-url-v1";
 const ACCOUNT_KEY = "finance-accounts-v1";
@@ -52,21 +45,83 @@ const TRANSACTION_KEY = "finance-transactions-v1";
 
 function notify(title: string, message: string) {
   if (Platform.OS === "web") {
-    window.alert(`${title}\n\n${message}`);
+    Alert.alert(title, message);
   } else {
     Alert.alert(title, message);
   }
 }
 
 function money(value: number) {
-  return value.toLocaleString("en-US", {
+  const safeValue = Number.isFinite(value) ? value : 0;
+
+  return safeValue.toLocaleString("en-US", {
     style: "currency",
     currency: "USD",
   });
 }
 
 function newId() {
-  return `${Date.now()}-${Math.random()}`;
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function validDebtData(value: unknown): value is Debt[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (item) =>
+        isRecord(item) &&
+        typeof item.id === "string" &&
+        typeof item.name === "string" &&
+        typeof item.balance === "number" &&
+        Number.isFinite(item.balance) &&
+        item.balance >= 0 &&
+        typeof item.apr === "number" &&
+        Number.isFinite(item.apr) &&
+        item.apr >= 0 &&
+        typeof item.minimumPayment === "number" &&
+        Number.isFinite(item.minimumPayment) &&
+        item.minimumPayment > 0
+    )
+  );
+}
+
+function validAccountData(value: unknown): value is Account[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (item) =>
+        isRecord(item) &&
+        typeof item.id === "string" &&
+        typeof item.name === "string" &&
+        ["Checking", "Savings", "Cash"].includes(String(item.type)) &&
+        typeof item.openingBalance === "number" &&
+        Number.isFinite(item.openingBalance) &&
+        item.openingBalance >= 0
+    )
+  );
+}
+
+function validTransactionData(value: unknown): value is Transaction[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (item) =>
+        isRecord(item) &&
+        typeof item.id === "string" &&
+        typeof item.accountId === "string" &&
+        typeof item.description === "string" &&
+        ["Deposit", "Expense", "Payment"].includes(String(item.type)) &&
+        typeof item.amount === "number" &&
+        Number.isFinite(item.amount) &&
+        item.amount > 0 &&
+        typeof item.date === "string" &&
+        !Number.isNaN(Date.parse(item.date))
+    )
+  );
 }
 
 export default function App() {
@@ -86,14 +141,16 @@ export default function App() {
   const [strategy, setStrategy] = useState<Strategy>("avalanche");
 
   const [accountName, setAccountName] = useState("");
-  const [accountType, setAccountType] = useState<AccountType>("Checking");
+  const [accountType, setAccountType] =
+    useState<AccountType>("Checking");
   const [openingBalance, setOpeningBalance] = useState("");
 
   const [transactionAccount, setTransactionAccount] = useState("");
   const [transactionType, setTransactionType] =
     useState<TransactionType>("Expense");
   const [transactionAmount, setTransactionAmount] = useState("");
-  const [transactionDescription, setTransactionDescription] = useState("");
+  const [transactionDescription, setTransactionDescription] =
+    useState("");
 
   const [apiUrl, setApiUrl] = useState("");
   const [agreement, setAgreement] = useState("");
@@ -102,6 +159,8 @@ export default function App() {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
+    let active = true;
+
     async function loadData() {
       try {
         const [savedDebts, savedAccounts, savedTransactions, savedUrl] =
@@ -112,113 +171,116 @@ export default function App() {
             AsyncStorage.getItem(URL_KEY),
           ]);
 
-        if (savedDebts) {
-          const parsed = JSON.parse(savedDebts);
-          if (
-            !Array.isArray(parsed) ||
-            parsed.some(
-              (d: any) =>
-                typeof d?.id !== "string" ||
-                typeof d?.name !== "string" ||
-                !Number.isFinite(d?.balance) ||
-                !Number.isFinite(d?.apr) ||
-                !Number.isFinite(d?.minimumPayment)
-            )
-          ) {
+        if (!active) return;
+
+        if (savedDebts !== null) {
+          const parsed: unknown = JSON.parse(savedDebts);
+
+          if (!validDebtData(parsed)) {
             throw new Error("Saved debt data is invalid.");
           }
+
           setDebts(parsed);
         }
 
-        if (savedAccounts) {
-          const parsed = JSON.parse(savedAccounts);
-          if (
-            !Array.isArray(parsed) ||
-            parsed.some(
-              (a: any) =>
-                typeof a?.id !== "string" ||
-                typeof a?.name !== "string" ||
-                !["Checking", "Savings", "Cash"].includes(a?.type) ||
-                !Number.isFinite(a?.openingBalance)
-            )
-          ) {
+        if (savedAccounts !== null) {
+          const parsed: unknown = JSON.parse(savedAccounts);
+
+          if (!validAccountData(parsed)) {
             throw new Error("Saved account data is invalid.");
           }
+
           setAccounts(parsed);
         }
 
-        if (savedTransactions) {
-          const parsed = JSON.parse(savedTransactions);
-          if (
-            !Array.isArray(parsed) ||
-            parsed.some(
-              (t: any) =>
-                typeof t?.id !== "string" ||
-                typeof t?.accountId !== "string" ||
-                typeof t?.description !== "string" ||
-                !["Deposit", "Expense", "Payment"].includes(t?.type) ||
-                !Number.isFinite(t?.amount) ||
-                typeof t?.date !== "string"
-            )
-          ) {
+        if (savedTransactions !== null) {
+          const parsed: unknown = JSON.parse(savedTransactions);
+
+          if (!validTransactionData(parsed)) {
             throw new Error("Saved transaction data is invalid.");
           }
+
           setTransactions(parsed);
         }
 
-        if (savedUrl) setApiUrl(savedUrl);
+        if (savedUrl !== null) {
+          setApiUrl(savedUrl);
+        }
       } catch {
-        setWarning(
-          "Some saved data could not be validated or loaded. Export or check your backup before making changes."
-        );
+        if (active) {
+          setWarning(
+            "Some saved data could not be validated or loaded. Check your backup before making changes."
+          );
+        }
       } finally {
-        setLoaded(true);
+        if (active) setLoaded(true);
       }
     }
 
-    loadData();
+    void loadData();
+
+    return () => {
+      active = false;
+    };
   }, []);
 
   useEffect(() => {
     if (!loaded || warning) return;
-    AsyncStorage.setItem(DEBT_KEY, JSON.stringify(debts)).catch(() =>
-      setWarning("Debt data could not be saved.")
-    );
+
+    AsyncStorage.setItem(DEBT_KEY, JSON.stringify(debts)).catch(() => {
+      setWarning("Debt data could not be saved. Check your backup.");
+    });
   }, [debts, loaded, warning]);
 
   useEffect(() => {
     if (!loaded || warning) return;
-    AsyncStorage.setItem(ACCOUNT_KEY, JSON.stringify(accounts)).catch(() =>
-      setWarning("Account data could not be saved.")
-    );
+
+    AsyncStorage.setItem(ACCOUNT_KEY, JSON.stringify(accounts)).catch(() => {
+      setWarning("Account data could not be saved. Check your backup.");
+    });
   }, [accounts, loaded, warning]);
 
   useEffect(() => {
     if (!loaded || warning) return;
+
     AsyncStorage.setItem(
       TRANSACTION_KEY,
       JSON.stringify(transactions)
-    ).catch(() => setWarning("Transaction data could not be saved."));
+    ).catch(() => {
+      setWarning("Transaction data could not be saved. Check your backup.");
+    });
   }, [transactions, loaded, warning]);
 
   useEffect(() => {
     if (!loaded) return;
-    AsyncStorage.setItem(URL_KEY, apiUrl.trim()).catch(() => {});
+
+    AsyncStorage.setItem(URL_KEY, apiUrl.trim()).catch(() => {
+      setWarning("Your backend URL could not be saved.");
+    });
   }, [apiUrl, loaded]);
 
   const totals = calculateDebtTotals(debts);
-  const result = simulatePayoff(debts, strategy, Number(extra));
+
+  const parsedExtra = Number(extra);
+  const safeExtra =
+    Number.isFinite(parsedExtra) && parsedExtra >= 0 ? parsedExtra : 0;
+
+  const result = simulatePayoff(debts, strategy, safeExtra);
 
   function accountBalance(accountId: string) {
-    const account = accounts.find((a) => a.id === accountId);
+    const account = accounts.find((item) => item.id === accountId);
+
     if (!account) return 0;
 
     return transactions.reduce((total, transaction) => {
       if (transaction.accountId !== accountId) return total;
-      return total +
+
+      return (
+        total +
         (transaction.type === "Deposit"
           ? transaction.amount
-          : -transaction.amount);
+          : -transaction.amount)
+      );
     }, account.openingBalance);
   }
 
@@ -228,20 +290,31 @@ export default function App() {
   );
 
   function addDebt() {
-    const b = Number(balance);
-    const a = Number(apr);
-    const m = Number(minimum);
+    const debtBalance = Number(balance);
+    const debtApr = Number(apr);
+    const minPayment = Number(minimum);
 
     if (
       !name.trim() ||
-      !Number.isFinite(b) ||
-      b <= 0 ||
-      !Number.isFinite(a) ||
-      a < 0 ||
-      !Number.isFinite(m) ||
-      m <= 0
+      balance.trim() === "" ||
+      apr.trim() === "" ||
+      minimum.trim() === "" ||
+      !Number.isFinite(debtBalance) ||
+      debtBalance <= 0 ||
+      !Number.isFinite(debtApr) ||
+      debtApr < 0 ||
+      !Number.isFinite(minPayment) ||
+      minPayment <= 0
     ) {
-      notify("Check your entries", "Enter a debt name, positive balance, non-negative APR, and positive minimum payment.");
+      notify(
+        "Check your entries",
+        "Enter a debt name, positive balance, non-negative APR, and positive minimum payment."
+      );
+      return;
+    }
+
+    if (debtApr > 100) {
+      notify("Check APR", "Enter the APR as a percentage, such as 7.5.");
       return;
     }
 
@@ -250,9 +323,9 @@ export default function App() {
       {
         id: newId(),
         name: name.trim(),
-        balance: b,
-        apr: a,
-        minimumPayment: m,
+        balance: debtBalance,
+        apr: debtApr,
+        minimumPayment: minPayment,
       },
     ]);
 
@@ -260,22 +333,19 @@ export default function App() {
     setBalance("");
     setApr("");
     setMinimum("");
-    notify("Debt added", "Your debt has been added to the planner.");
+
+    notify("Debt added", "Your debt was added to the payoff planner.");
   }
 
   function removeDebt(id: string) {
     const debt = debts.find((item) => item.id === id);
     if (!debt) return;
 
-    const remove = () =>
+    const remove = () => {
       setDebts((current) => current.filter((item) => item.id !== id));
+    };
 
-    if (Platform.OS === "web") {
-      if (window.confirm(`Remove "${debt.name}" from your planner?`)) remove();
-      return;
-    }
-
-    Alert.alert("Remove debt", `Remove "${debt.name}"?`, [
+    Alert.alert("Remove debt", `Remove "${debt.name}" from your planner?`, [
       { text: "Cancel", style: "cancel" },
       { text: "Remove", style: "destructive", onPress: remove },
     ]);
@@ -284,36 +354,55 @@ export default function App() {
   function addAccount() {
     const opening = Number(openingBalance);
 
-    if (!accountName.trim() || !Number.isFinite(opening) || opening < 0) {
-      notify("Check your entries", "Enter an account name and a valid opening balance of zero or more.");
+    if (
+      !accountName.trim() ||
+      openingBalance.trim() === "" ||
+      !Number.isFinite(opening) ||
+      opening < 0
+    ) {
+      notify(
+        "Check your entries",
+        "Enter an account name and an opening balance of zero or more."
+      );
       return;
     }
 
-    setAccounts((current) => [
-      ...current,
-      {
-        id: newId(),
-        name: accountName.trim(),
-        type: accountType,
-        openingBalance: opening,
-      },
-    ]);
+    const account: Account = {
+      id: newId(),
+      name: accountName.trim(),
+      type: accountType,
+      openingBalance: opening,
+    };
 
+    setAccounts((current) => [...current, account]);
+    setTransactionAccount(account.id);
     setAccountName("");
     setOpeningBalance("");
-    notify("Account added", "Your account has been saved on this device.");
+
+    notify("Account added", "Your account was saved on this device.");
   }
 
   function addTransaction() {
     const amount = Number(transactionAmount);
 
-    if (!transactionAccount || !accounts.some((a) => a.id === transactionAccount)) {
-      notify("Choose an account", "Add an account first, then select it here.");
+    if (
+      !transactionAccount ||
+      !accounts.some((account) => account.id === transactionAccount)
+    ) {
+      notify("Choose an account", "Select an account before continuing.");
       return;
     }
 
-    if (!transactionDescription.trim() || !Number.isFinite(amount) || amount <= 0) {
-      notify("Check your entries", "Enter a description and an amount greater than zero.");
+    if (
+      !transactionDescription.trim() ||
+      transactionAmount.trim() === "" ||
+      !Number.isFinite(amount) ||
+      amount <= 0
+    ) {
+      notify(
+        "Check your entries",
+        "Enter a description and an amount greater than zero."
+      );
       return;
     }
 
@@ -322,26 +411,47 @@ export default function App() {
     if (transactionType !== "Deposit" && amount > current) {
       notify(
         "Insufficient recorded balance",
-        "This transaction is larger than the account's recorded balance. Check your balance and entries before continuing."
+        "This transaction exceeds the account's recorded balance. Check your entries first."
       );
       return;
     }
 
+    const transaction: Transaction = {
+      id: newId(),
+      accountId: transactionAccount,
+      description: transactionDescription.trim(),
+      type: transactionType,
+      amount,
+      date: new Date().toISOString(),
+    };
+
     setTransactions((currentTransactions) => [
-      {
-        id: newId(),
-        accountId: transactionAccount,
-        description: transactionDescription.trim(),
-        type: transactionType,
-        amount,
-        date: new Date().toISOString(),
-      },
+      transaction,
       ...currentTransactions,
     ]);
 
     setTransactionAmount("");
     setTransactionDescription("");
-    notify("Transaction recorded", "The transaction was added to your checkbook.");
+
+    notify("Transaction recorded", "Your transaction was saved.");
+  }
+
+  function deleteTransaction(id: string) {
+    Alert.alert(
+      "Delete transaction",
+      "This will remove the transaction and recalculate the recorded account balance.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: () =>
+            setTransactions((current) =>
+              current.filter((item) => item.id !== id)
+            ),
+        },
+      ]
+    );
   }
 
   function exportBackup() {
@@ -352,7 +462,7 @@ export default function App() {
         debts,
         accounts,
         transactions,
-        extraPayment: Number(extra),
+        extraPayment: safeExtra,
         strategy,
       },
       null,
@@ -362,35 +472,52 @@ export default function App() {
     if (Platform.OS !== "web") {
       notify(
         "Backup",
-        "JSON download is currently available in the web version. Keep a separate backup before uninstalling the app."
+        "Use the web version's Export JSON backup option to download a backup. Keep a separate copy before uninstalling the Android app."
       );
       return;
     }
 
-    const blob = new Blob([data], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "automatic-debt-payoff-backup.json";
-    link.click();
-    URL.revokeObjectURL(url);
+    try {
+      const blob = new Blob([data], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+
+      link.href = url;
+      link.download = "automatic-debt-payoff-backup.json";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch {
+      notify("Backup failed", "Your backup could not be downloaded.");
+    }
   }
 
   async function analyzeAgreement() {
     const base = apiUrl.trim().replace(/\/+$/, "");
 
-    if (!base.startsWith("https://")) {
-      notify("Backend URL required", "Enter your deployed HTTPS backend URL.");
+    if (!/^https:\/\/[^/\s]+/i.test(base)) {
+      notify(
+        "Backend URL required",
+        "Enter the HTTPS URL of your deployed backend."
+      );
       return;
     }
 
     if (agreement.trim().length < 100) {
-      notify("Agreement text needed", "Paste at least 100 characters.");
+      notify(
+        "Agreement text needed",
+        "Paste at least 100 characters of agreement wording."
+      );
       return;
     }
 
     if (!consent) {
-      notify("Confirmation required", "Remove personal information and confirm before sending.");
+      notify(
+        "Confirmation required",
+        "Remove personal information and confirm before sending."
+      );
       return;
     }
 
@@ -404,13 +531,26 @@ export default function App() {
         body: JSON.stringify({ agreement: agreement.trim() }),
       });
 
-      const data = await response.json();
+      const data: unknown = await response.json().catch(() => null);
 
       if (!response.ok) {
-        throw new Error(data?.error || "Analysis request failed.");
+        const message =
+          isRecord(data) && typeof data.error === "string"
+            ? data.error
+            : `Analysis failed (HTTP ${response.status}).`;
+
+        throw new Error(message);
       }
 
-      setAnalysis(data.analysis || "No analysis was returned.");
+      if (
+        !isRecord(data) ||
+        typeof data.analysis !== "string" ||
+        !data.analysis.trim()
+      ) {
+        throw new Error("The backend returned no usable analysis.");
+      }
+
+      setAnalysis(data.analysis);
     } catch (error) {
       notify(
         "Analysis failed",
@@ -421,25 +561,30 @@ export default function App() {
     }
   }
 
-  const field = (
+  function field(
     label: string,
     value: string,
     change: (value: string) => void,
     placeholder = "",
     numeric = true
-  ) => (
-    <View style={styles.field}>
-      <Text style={styles.label}>{label}</Text>
-      <TextInput
-        style={styles.input}
-        value={value}
-        onChangeText={change}
-        placeholder={placeholder}
-        keyboardType={numeric ? "decimal-pad" : "default"}
-        autoCapitalize={numeric ? "none" : "sentences"}
-      />
-    </View>
-  );
+  ) {
+    return (
+      <View style={styles.field} key={label}>
+        <Text style={styles.label}>{label}</Text>
+        <TextInput
+          style={styles.input}
+          value={value}
+          onChangeText={change}
+          placeholder={placeholder}
+          placeholderTextColor="#8b96a7"
+          keyboardType={numeric ? "decimal-pad" : "default"}
+          autoCapitalize={numeric ? "none" : "sentences"}
+          autoCorrect={!numeric}
+          editable={!busy}
+        />
+      </View>
+    );
+  }
 
   const navItems: { key: Screen; label: string }[] = [
     { key: "dashboard", label: "Home" },
@@ -449,427 +594,654 @@ export default function App() {
     { key: "agreement", label: "Loan Help" },
   ];
 
-  return (
-    <ScrollView
-      style={styles.page}
-      contentContainerStyle={styles.container}
-      keyboardShouldPersistTaps="handled"
-    >
-      <Text style={styles.eyebrow}>YOUR MONEY, YOUR PLAN</Text>
-      <Text style={styles.title}>Automatic Debt Payoff</Text>
-      <Text style={styles.subtitle}>
-        One place to track your money and plan your way forward.
-      </Text>
-
-      <View style={styles.nav}>
-        {navItems.map((item) => (
-          <Pressable
-            key={item.key}
-            style={[styles.navItem, screen === item.key && styles.active]}
-            onPress={() => setScreen(item.key)}
-          >
-            <Text style={[styles.navText, screen === item.key && styles.activeText]}>
-              {item.label}
-            </Text>
-          </Pressable>
-        ))}
+  if (!loaded) {
+    return (
+      <View style={styles.loading}>
+        <Text style={styles.brand}>AUTOMATIC DEBT PAYOFF</Text>
+        <Text style={styles.help}>Loading your saved information...</Text>
       </View>
+    );
+  }
 
-      {screen === "dashboard" && (
-        <>
-          <View style={styles.hero}>
-            <Text style={styles.heroLabel}>MONEY IN YOUR ACCOUNTS</Text>
-            <Text style={styles.heroAmount}>{money(totalCash)}</Text>
-            <Text style={styles.heroNote}>
-              Based on the opening balances and transactions you entered.
-            </Text>
-          </View>
+  return (
+    <View style={styles.page}>
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={styles.container}
+        keyboardShouldPersistTaps="handled"
+      >
+        <View style={styles.header}>
+          <Text style={styles.eyebrow}>YOUR MONEY, YOUR PLAN</Text>
+          <Text style={styles.title}>Automatic Debt Payoff</Text>
+          <Text style={styles.subtitle}>
+            Track your money. Plan your payoff. Move forward.
+          </Text>
+        </View>
 
-          <View style={styles.card}>
-            <Text style={styles.heading}>Your financial snapshot</Text>
-            <View style={styles.statRow}>
-              <Text style={styles.statLabel}>Total tracked debt</Text>
-              <Text style={styles.statValue}>{money(totals.balance)}</Text>
-            </View>
-            <View style={styles.statRow}>
-              <Text style={styles.statLabel}>Minimum debt payments</Text>
-              <Text style={styles.statValue}>{money(totals.minimumPayments)}/mo</Text>
-            </View>
-            <View style={styles.statRow}>
-              <Text style={styles.statLabel}>Cash minus tracked debt</Text>
-              <Text style={styles.statValue}>{money(totalCash - totals.balance)}</Text>
-            </View>
-            <Text style={styles.help}>
-              This is a simple snapshot, not a full net-worth calculation.
-              Only accounts and debts you enter are included.
-            </Text>
-          </View>
-
-          <View style={styles.card}>
-            <Text style={styles.heading}>Quick actions</Text>
-            <Pressable style={styles.button} onPress={() => setScreen("accounts")}>
-              <Text style={styles.buttonText}>+ Add an account</Text>
-            </Pressable>
-            <Pressable style={styles.secondary} onPress={() => setScreen("checkbook")}>
-              <Text style={styles.secondaryText}>+ Record a transaction</Text>
-            </Pressable>
-            <Pressable style={styles.secondary} onPress={() => setScreen("debts")}>
-              <Text style={styles.secondaryText}>View debt payoff plan</Text>
-            </Pressable>
-          </View>
-
-          <View style={styles.card}>
-            <Text style={styles.heading}>Accounts at a glance</Text>
-            {accounts.length === 0 ? (
-              <Text style={styles.help}>
-                You have not added accounts yet. Start with checking, savings, or cash.
+        <View style={styles.nav}>
+          {navItems.map((item) => (
+            <Pressable
+              key={item.key}
+              style={[
+                styles.navItem,
+                screen === item.key && styles.navItemActive,
+              ]}
+              onPress={() => setScreen(item.key)}
+            >
+              <Text
+                style={[
+                  styles.navText,
+                  screen === item.key && styles.navTextActive,
+                ]}
+              >
+                {item.label}
               </Text>
-            ) : (
-              accounts.map((account) => (
-                <View style={styles.listRow} key={account.id}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.itemTitle}>{account.name}</Text>
-                    <Text style={styles.help}>{account.type}</Text>
-                  </View>
-                  <Text style={styles.statValue}>{money(accountBalance(account.id))}</Text>
-                </View>
-              ))
-            )}
-          </View>
-        </>
-      )}
-
-      {screen === "accounts" && (
-        <>
-          <View style={styles.card}>
-            <Text style={styles.heading}>Add an account</Text>
-            {field("Account nickname", accountName, setAccountName, "Everyday checking", false)}
-            <Text style={styles.label}>Account type</Text>
-            <View style={styles.row}>
-              {(["Checking", "Savings", "Cash"] as AccountType[]).map((type) => (
-                <Pressable
-                  key={type}
-                  style={[styles.tab, accountType === type && styles.active]}
-                  onPress={() => setAccountType(type)}
-                >
-                  <Text>{type}</Text>
-                </Pressable>
-              ))}
-            </View>
-            {field("Opening balance ($)", openingBalance, setOpeningBalance, "500")}
-            <Pressable style={styles.button} onPress={addAccount}>
-              <Text style={styles.buttonText}>Save account</Text>
             </Pressable>
-          </View>
+          ))}
+        </View>
 
-          <View style={styles.card}>
-            <Text style={styles.heading}>Your accounts</Text>
-            {accounts.length === 0 ? (
-              <Text>No accounts yet.</Text>
-            ) : (
-              accounts.map((account) => (
-                <View style={styles.listRow} key={account.id}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.itemTitle}>{account.name}</Text>
-                    <Text style={styles.help}>{account.type}</Text>
-                  </View>
-                  <Text style={styles.statValue}>{money(accountBalance(account.id))}</Text>
-                </View>
-              ))
-            )}
+        {!!warning && (
+          <View style={styles.warning}>
+            <Text style={styles.warningTitle}>Data warning</Text>
+            <Text style={styles.help}>{warning}</Text>
             <Text style={styles.help}>
-              For this first version, accounts cannot yet be edited or deleted.
-              Check your opening balance carefully.
+              Saving is paused for validated financial records until you
+              investigate this warning. Do not uninstall the app or clear its
+              storage before checking your backup.
             </Text>
           </View>
-        </>
-      )}
+        )}
 
-      {screen === "checkbook" && (
-        <>
-          <View style={styles.card}>
-            <Text style={styles.heading}>Record a transaction</Text>
+        {screen === "dashboard" && (
+          <>
+            <View style={styles.hero}>
+              <Text style={styles.heroLabel}>TOTAL RECORDED CASH</Text>
+              <Text style={styles.heroAmount}>{money(totalCash)}</Text>
+              <Text style={styles.heroNote}>
+                Calculated from the opening balances and transactions you
+                recorded.
+              </Text>
+            </View>
 
-            {accounts.length === 0 ? (
-              <>
-                <Text style={styles.help}>
-                  Add an account before recording transactions.
+            <View style={styles.statsGrid}>
+              <View style={styles.statCard}>
+                <Text style={styles.statLabel}>Tracked debt</Text>
+                <Text style={styles.statValue}>{money(totals.balance)}</Text>
+              </View>
+              <View style={styles.statCard}>
+                <Text style={styles.statLabel}>Minimum payments</Text>
+                <Text style={styles.statValue}>
+                  {money(totals.minimumPayments)}
                 </Text>
-                <Pressable style={styles.button} onPress={() => setScreen("accounts")}>
-                  <Text style={styles.buttonText}>Add account first</Text>
-                </Pressable>
-              </>
-            ) : (
-              <>
-                <Text style={styles.label}>Account</Text>
-                {accounts.map((account) => (
-                  <Pressable
-                    key={account.id}
-                    style={[
-                      styles.choice,
-                      transactionAccount === account.id && styles.choiceActive,
-                    ]}
-                    onPress={() => setTransactionAccount(account.id)}
-                  >
-                    <Text style={styles.itemTitle}>{account.name}</Text>
-                    <Text>{money(accountBalance(account.id))}</Text>
-                  </Pressable>
-                ))}
+                <Text style={styles.help}>Per month</Text>
+              </View>
+              <View style={styles.statCard}>
+                <Text style={styles.statLabel}>Cash minus debt</Text>
+                <Text style={styles.statValue}>
+                  {money(totalCash - totals.balance)}
+                </Text>
+              </View>
+              <View style={styles.statCard}>
+                <Text style={styles.statLabel}>Accounts</Text>
+                <Text style={styles.statValue}>{accounts.length}</Text>
+              </View>
+            </View>
 
-                <Text style={styles.label}>Transaction type</Text>
-                <View style={styles.row}>
-                  {(["Deposit", "Expense", "Payment"] as TransactionType[]).map((type) => (
+            <View style={styles.card}>
+              <Text style={styles.heading}>Quick actions</Text>
+              <Pressable
+                style={styles.button}
+                onPress={() => setScreen("debts")}
+              >
+                <Text style={styles.buttonText}>View payoff plan</Text>
+              </Pressable>
+              <Pressable
+                style={styles.secondary}
+                onPress={() => setScreen("accounts")}
+              >
+                <Text style={styles.secondaryText}>+ Add an account</Text>
+              </Pressable>
+              <Pressable
+                style={styles.secondary}
+                onPress={() => setScreen("checkbook")}
+              >
+                <Text style={styles.secondaryText}>+ Record a transaction</Text>
+              </Pressable>
+            </View>
+
+            <View style={styles.card}>
+              <Text style={styles.heading}>Accounts at a glance</Text>
+              {accounts.length === 0 ? (
+                <Text style={styles.help}>
+                  No accounts yet. Add checking, savings, or cash to get
+                  started.
+                </Text>
+              ) : (
+                accounts.map((account) => (
+                  <View style={styles.listRow} key={account.id}>
+                    <View style={styles.flex}>
+                      <Text style={styles.itemTitle}>{account.name}</Text>
+                      <Text style={styles.help}>{account.type}</Text>
+                    </View>
+                    <Text style={styles.statValue}>
+                      {money(accountBalance(account.id))}
+                    </Text>
+                  </View>
+                ))
+              )}
+            </View>
+
+            <View style={styles.card}>
+              <Text style={styles.heading}>Your payoff strategy</Text>
+              <Text style={styles.metric}>
+                {strategy === "avalanche" ? "Debt avalanche" : "Debt snowball"}
+              </Text>
+              <Text style={styles.help}>
+                {result.months === null
+                  ? "Add your debts to estimate your payoff timeline."
+                  : `Estimated payoff: ${result.months} months`}
+              </Text>
+              <Text style={styles.help}>
+                Estimates depend on the balances, APRs, and minimum payments
+                you enter. They are not a guarantee.
+              </Text>
+            </View>
+          </>
+        )}
+
+        {screen === "accounts" && (
+          <>
+            <View style={styles.card}>
+              <Text style={styles.heading}>Add an account</Text>
+              {field(
+                "Account nickname",
+                accountName,
+                setAccountName,
+                "Everyday checking",
+                false
+              )}
+
+              <Text style={styles.label}>Account type</Text>
+              <View style={styles.row}>
+                {(["Checking", "Savings", "Cash"] as AccountType[]).map(
+                  (type) => (
                     <Pressable
                       key={type}
-                      style={[styles.tab, transactionType === type && styles.active]}
-                      onPress={() => setTransactionType(type)}
-                    >
-                      <Text>{type}</Text>
-                    </Pressable>
-                  ))}
-                </View>
-
-                {field("Amount ($)", transactionAmount, setTransactionAmount, "45.00")}
-                {field(
-                  "Description",
-                  transactionDescription,
-                  setTransactionDescription,
-                  "Groceries, paycheck, or bill",
-                  false
-                )}
-
-                <Text style={styles.help}>
-                  Deposits increase the selected account. Expenses and payments
-                  decrease it. Recording a payment here does not automatically
-                  change a debt balance in the debt planner.
-                </Text>
-
-                <Pressable style={styles.button} onPress={addTransaction}>
-                  <Text style={styles.buttonText}>Save transaction</Text>
-                </Pressable>
-              </>
-            )}
-          </View>
-
-          <View style={styles.card}>
-            <Text style={styles.heading}>Transaction history</Text>
-            {transactions.length === 0 ? (
-              <Text>No transactions recorded yet.</Text>
-            ) : (
-              transactions.map((transaction) => {
-                const account = accounts.find((a) => a.id === transaction.accountId);
-                return (
-                  <View style={styles.listRow} key={transaction.id}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.itemTitle}>{transaction.description}</Text>
-                      <Text style={styles.help}>
-                        {account?.name || "Account"} · {transaction.type}
-                      </Text>
-                      <Text style={styles.help}>
-                        {new Date(transaction.date).toLocaleDateString()}
-                      </Text>
-                    </View>
-                    <Text
                       style={[
-                        styles.statValue,
-                        transaction.type === "Deposit" ? styles.positive : styles.negative,
+                        styles.tab,
+                        accountType === type && styles.tabActive,
                       ]}
+                      onPress={() => setAccountType(type)}
                     >
-                      {transaction.type === "Deposit" ? "+" : "-"}
-                      {money(transaction.amount)}
-                    </Text>
-                  </View>
-                );
-              })
-            )}
-          </View>
-        </>
-      )}
+                      <Text
+                        style={[
+                          styles.tabText,
+                          accountType === type && styles.tabTextActive,
+                        ]}
+                      >
+                        {type}
+                      </Text>
+                    </Pressable>
+                  )
+                )}
+              </View>
 
-      {screen === "debts" && (
-        <>
-          <View style={styles.card}>
-            <Text style={styles.heading}>Debt overview</Text>
-            <Text style={styles.bigNumber}>{money(totals.balance)}</Text>
-            <Text>Minimum payments: {money(totals.minimumPayments)}/month</Text>
-          </View>
+              {field(
+                "Opening balance ($)",
+                openingBalance,
+                setOpeningBalance,
+                "500.00"
+              )}
 
-          <View style={styles.card}>
-            <Text style={styles.heading}>Repayment strategy</Text>
-            <View style={styles.row}>
-              <Pressable
-                style={[styles.tab, strategy === "avalanche" && styles.active]}
-                onPress={() => setStrategy("avalanche")}
-              >
-                <Text>Avalanche</Text>
-              </Pressable>
-              <Pressable
-                style={[styles.tab, strategy === "snowball" && styles.active]}
-                onPress={() => setStrategy("snowball")}
-              >
-                <Text>Snowball</Text>
+              <Pressable style={styles.button} onPress={addAccount}>
+                <Text style={styles.buttonText}>Save account</Text>
               </Pressable>
             </View>
-            <Text style={styles.help}>
-              Avalanche targets the highest APR first. Snowball targets the
-              smallest balance first.
-            </Text>
-            {field("Extra monthly payment ($)", extra, setExtra, "0")}
-            <Text style={styles.metric}>
-              Monthly budget: {money(result.monthlyBudget)}
-            </Text>
-            <Text style={styles.metric}>
-              {result.months === null
-                ? "Unable to estimate payoff"
-                : `Estimated payoff: ${result.months} months`}
-            </Text>
-            <Text>Estimated interest: {money(result.totalInterest)}</Text>
-            <Text style={styles.help}>{result.message}</Text>
-            <Text style={styles.help}>
-              Estimates may differ from lender calculations and payment-posting dates.
-            </Text>
-          </View>
 
-          <View style={styles.card}>
-            <Text style={styles.heading}>Add a debt</Text>
-            {field("Debt name", name, setName, "Auto loan", false)}
-            {field("Balance ($)", balance, setBalance, "12000")}
-            {field("APR (%)", apr, setApr, "7.5")}
-            {field("Minimum monthly payment ($)", minimum, setMinimum, "350")}
-            <Pressable style={styles.button} onPress={addDebt}>
-              <Text style={styles.buttonText}>Add debt</Text>
-            </Pressable>
-          </View>
-
-          <View style={styles.card}>
-            <Text style={styles.heading}>Your debts</Text>
-            {debts.length === 0 ? (
-              <Text>No debts added yet.</Text>
-            ) : (
-              debts.map((debt) => (
-                <View style={styles.listRow} key={debt.id}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.itemTitle}>{debt.name}</Text>
-                    <Text>{money(debt.balance)} · {debt.apr}% APR</Text>
-                    <Text style={styles.help}>
-                      Minimum: {money(debt.minimumPayment)}/month
+            <View style={styles.card}>
+              <Text style={styles.heading}>Your accounts</Text>
+              {accounts.length === 0 ? (
+                <Text style={styles.help}>No accounts have been added.</Text>
+              ) : (
+                accounts.map((account) => (
+                  <View style={styles.listRow} key={account.id}>
+                    <View style={styles.flex}>
+                      <Text style={styles.itemTitle}>{account.name}</Text>
+                      <Text style={styles.help}>{account.type}</Text>
+                    </View>
+                    <Text style={styles.statValue}>
+                      {money(accountBalance(account.id))}
                     </Text>
                   </View>
-                  <Pressable onPress={() => removeDebt(debt.id)}>
-                    <Text style={styles.link}>Remove</Text>
-                  </Pressable>
-                </View>
-              ))
-            )}
-          </View>
-        </>
-      )}
-
-      {screen === "agreement" && (
-        <View style={styles.card}>
-          <Text style={styles.heading}>Understand My Loan Agreement</Text>
-          <Text style={styles.help}>
-            Examine extra-payment allocation, principal-only payments, interest,
-            fees, and early payoff wording.
-          </Text>
-
-          <View style={styles.warning}>
-            <Text>
-              Remove account numbers, Social Security numbers, addresses,
-              signatures, and other sensitive information. Your text will be sent
-              to your configured backend for analysis.
-            </Text>
-          </View>
-
-          {field("Backend HTTPS URL", apiUrl, setApiUrl, "https://your-service.onrender.com", false)}
-          <View style={styles.field}>
-            <Text style={styles.label}>Loan agreement text</Text>
-            <TextInput
-              style={[styles.input, styles.multiline]}
-              value={agreement}
-              onChangeText={setAgreement}
-              multiline
-              textAlignVertical="top"
-              placeholder="Paste agreement wording here..."
-            />
-          </View>
-
-          <Pressable
-            style={styles.secondary}
-            onPress={() => setConsent((value) => !value)}
-          >
-            <Text style={styles.secondaryText}>
-              {consent ? "✓ Confirmed: send text for analysis" : "Confirm sending text for analysis"}
-            </Text>
-          </Pressable>
-
-          <Pressable
-            style={[styles.button, busy && styles.disabled]}
-            onPress={analyzeAgreement}
-            disabled={busy}
-          >
-            <Text style={styles.buttonText}>
-              {busy ? "Analyzing..." : "Analyze agreement"}
-            </Text>
-          </Pressable>
-
-          {!!analysis && (
-            <View style={styles.analysis}>
-              <Text style={styles.heading}>Analysis results</Text>
-              <Text selectable>{analysis}</Text>
+                ))
+              )}
               <Text style={styles.help}>
-                Educational information only, not legal advice. Confirm payment
-                procedures with your lender.
+                Account balances are estimates based on your entries. They are
+                not live bank balances.
               </Text>
             </View>
-          )}
-        </View>
-      )}
+          </>
+        )}
 
-      <View style={styles.card}>
-        <Text style={styles.heading}>Your data</Text>
-        <Text style={styles.help}>
-          Your entries are saved locally on this device. Export a backup before
-          uninstalling or replacing the app. This version does not yet have a
-          native Android backup/export workflow.
-        </Text>
-        <Pressable style={styles.secondary} onPress={exportBackup}>
-          <Text style={styles.secondaryText}>Export JSON backup (web)</Text>
-        </Pressable>
-      </View>
+        {screen === "checkbook" && (
+          <>
+            <View style={styles.card}>
+              <Text style={styles.heading}>Record a transaction</Text>
 
-      {!!warning && (
-        <View style={styles.warning}>
-          <Text>{warning}</Text>
+              {accounts.length === 0 ? (
+                <>
+                  <Text style={styles.help}>
+                    Add an account before recording transactions.
+                  </Text>
+                  <Pressable
+                    style={styles.button}
+                    onPress={() => setScreen("accounts")}
+                  >
+                    <Text style={styles.buttonText}>Add account first</Text>
+                  </Pressable>
+                </>
+              ) : (
+                <>
+                  <Text style={styles.label}>Select account</Text>
+                  {accounts.map((account) => (
+                    <Pressable
+                      key={account.id}
+                      style={[
+                        styles.choice,
+                        transactionAccount === account.id &&
+                          styles.choiceActive,
+                      ]}
+                      onPress={() => setTransactionAccount(account.id)}
+                    >
+                      <View style={styles.flex}>
+                        <Text style={styles.itemTitle}>{account.name}</Text>
+                        <Text style={styles.help}>{account.type}</Text>
+                      </View>
+                      <Text style={styles.statValue}>
+                        {money(accountBalance(account.id))}
+                      </Text>
+                    </Pressable>
+                  ))}
+
+                  <Text style={[styles.label, styles.spacedLabel]}>
+                    Transaction type
+                  </Text>
+                  <View style={styles.row}>
+                    {(
+                      ["Deposit", "Expense", "Payment"] as TransactionType[]
+                    ).map((type) => (
+                      <Pressable
+                        key={type}
+                        style={[
+                          styles.tab,
+                          transactionType === type && styles.tabActive,
+                        ]}
+                        onPress={() => setTransactionType(type)}
+                      >
+                        <Text
+                          style={[
+                            styles.tabText,
+                            transactionType === type && styles.tabTextActive,
+                          ]}
+                        >
+                          {type}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+
+                  {field(
+                    "Amount ($)",
+                    transactionAmount,
+                    setTransactionAmount,
+                    "45.00"
+                  )}
+                  {field(
+                    "Description",
+                    transactionDescription,
+                    setTransactionDescription,
+                    "Groceries, paycheck, or bill",
+                    false
+                  )}
+
+                  <Text style={styles.help}>
+                    Deposits increase your recorded balance. Expenses and
+                    payments decrease it. Recording a payment does not
+                    automatically change the debt planner balance.
+                  </Text>
+
+                  <Pressable style={styles.button} onPress={addTransaction}>
+                    <Text style={styles.buttonText}>Save transaction</Text>
+                  </Pressable>
+                </>
+              )}
+            </View>
+
+            <View style={styles.card}>
+              <Text style={styles.heading}>Transaction history</Text>
+              {transactions.length === 0 ? (
+                <Text style={styles.help}>No transactions recorded yet.</Text>
+              ) : (
+                transactions.map((transaction) => {
+                  const account = accounts.find(
+                    (item) => item.id === transaction.accountId
+                  );
+
+                  return (
+                    <View style={styles.listRow} key={transaction.id}>
+                      <View style={styles.flex}>
+                        <Text style={styles.itemTitle}>
+                          {transaction.description}
+                        </Text>
+                        <Text style={styles.help}>
+                          {account?.name ?? "Account"} · {transaction.type}
+                        </Text>
+                        <Text style={styles.help}>
+                          {new Date(transaction.date).toLocaleDateString()}
+                        </Text>
+                        <Pressable
+                          onPress={() => deleteTransaction(transaction.id)}
+                          style={styles.deleteAction}
+                        >
+                          <Text style={styles.deleteText}>Delete transaction</Text>
+                        </Pressable>
+                      </View>
+                      <Text
+                        style={[
+                          styles.statValue,
+                          transaction.type === "Deposit"
+                            ? styles.positive
+                            : styles.negative,
+                        ]}
+                      >
+                        {transaction.type === "Deposit" ? "+" : "-"}
+                        {money(transaction.amount)}
+                      </Text>
+                    </View>
+                  );
+                })
+              )}
+            </View>
+          </>
+        )}
+
+        {screen === "debts" && (
+          <>
+            <View style={styles.hero}>
+              <Text style={styles.heroLabel}>TOTAL TRACKED DEBT</Text>
+              <Text style={styles.heroAmount}>{money(totals.balance)}</Text>
+              <Text style={styles.heroNote}>
+                Minimum payments: {money(totals.minimumPayments)} per month
+              </Text>
+            </View>
+
+            <View style={styles.card}>
+              <Text style={styles.heading}>Repayment strategy</Text>
+              <View style={styles.row}>
+                <Pressable
+                  style={[
+                    styles.tab,
+                    strategy === "avalanche" && styles.tabActive,
+                  ]}
+                  onPress={() => setStrategy("avalanche")}
+                >
+                  <Text
+                    style={[
+                      styles.tabText,
+                      strategy === "avalanche" && styles.tabTextActive,
+                    ]}
+                  >
+                    Avalanche
+                  </Text>
+                </Pressable>
+                <Pressable
+                  style={[
+                    styles.tab,
+                    strategy === "snowball" && styles.tabActive,
+                  ]}
+                  onPress={() => setStrategy("snowball")}
+                >
+                  <Text
+                    style={[
+                      styles.tabText,
+                      strategy === "snowball" && styles.tabTextActive,
+                    ]}
+                  >
+                    Snowball
+                  </Text>
+                </Pressable>
+              </View>
+
+              <Text style={styles.help}>
+                Avalanche prioritizes the highest APR. Snowball prioritizes the
+                smallest balance. Both approaches assume you keep making
+                required minimum payments.
+              </Text>
+
+              {field(
+                "Extra monthly payment ($)",
+                extra,
+                setExtra,
+                "0.00"
+              )}
+
+              {extra.trim() !== "" &&
+                (!Number.isFinite(Number(extra)) || Number(extra) < 0) && (
+                  <Text style={styles.errorText}>
+                    Enter zero or a positive extra payment.
+                  </Text>
+                )}
+
+              <View style={styles.resultPanel}>
+                <Text style={styles.statLabel}>Estimated monthly budget</Text>
+                <Text style={styles.resultNumber}>
+                  {money(result.monthlyBudget)}
+                </Text>
+
+                <Text style={styles.statLabel}>Estimated payoff</Text>
+                <Text style={styles.resultNumber}>
+                  {result.months === null
+                    ? "Unable to estimate"
+                    : `${result.months} months`}
+                </Text>
+
+                <Text style={styles.statLabel}>Estimated total interest</Text>
+                <Text style={styles.resultNumber}>
+                  {money(result.totalInterest)}
+                </Text>
+              </View>
+
+              <Text style={styles.help}>{result.message}</Text>
+              <Text style={styles.help}>
+                These are estimates, not lender quotes. Actual interest and
+                payoff dates can differ.
+              </Text>
+            </View>
+
+            <View style={styles.card}>
+              <Text style={styles.heading}>Add a debt</Text>
+              {field("Debt name", name, setName, "Auto loan", false)}
+              {field("Current balance ($)", balance, setBalance, "12000.00")}
+              {field("APR (%)", apr, setApr, "7.5")}
+              {field(
+                "Minimum monthly payment ($)",
+                minimum,
+                setMinimum,
+                "350.00"
+              )}
+
+              <Pressable style={styles.button} onPress={addDebt}>
+                <Text style={styles.buttonText}>Add debt</Text>
+              </Pressable>
+            </View>
+
+            <View style={styles.card}>
+              <Text style={styles.heading}>Your debts</Text>
+              {debts.length === 0 ? (
+                <Text style={styles.help}>
+                  No debts yet. Add a debt to see your estimated payoff plan.
+                </Text>
+              ) : (
+                debts.map((debt) => (
+                  <View style={styles.listRow} key={debt.id}>
+                    <View style={styles.flex}>
+                      <Text style={styles.itemTitle}>{debt.name}</Text>
+                      <Text style={styles.debtBalance}>
+                        {money(debt.balance)}
+                      </Text>
+                      <Text style={styles.help}>
+                        APR: {debt.apr}% · Minimum:{" "}
+                        {money(debt.minimumPayment)}/mo
+                      </Text>
+                    </View>
+                    <Pressable
+                      onPress={() => removeDebt(debt.id)}
+                      style={styles.deleteAction}
+                    >
+                      <Text style={styles.deleteText}>Remove</Text>
+                    </Pressable>
+                  </View>
+                ))
+              )}
+            </View>
+          </>
+        )}
+
+        {screen === "agreement" && (
+          <View style={styles.card}>
+            <Text style={styles.heading}>Understand My Loan Agreement</Text>
+            <Text style={styles.help}>
+              Review wording about extra payments, principal-only payments,
+              interest, fees, and early payoff.
+            </Text>
+
+            <View style={styles.warning}>
+              <Text style={styles.warningTitle}>Protect your information</Text>
+              <Text style={styles.help}>
+                Remove account numbers, Social Security numbers, addresses,
+                signatures, and other sensitive information before sending.
+                Agreement text will be transmitted to your configured backend.
+              </Text>
+            </View>
+
+            {field(
+              "Backend HTTPS URL",
+              apiUrl,
+              setApiUrl,
+              "https://your-service.onrender.com",
+              false
+            )}
+
+            <View style={styles.field}>
+              <Text style={styles.label}>Loan agreement text</Text>
+              <TextInput
+                style={[styles.input, styles.multiline]}
+                value={agreement}
+                onChangeText={setAgreement}
+                multiline
+                textAlignVertical="top"
+                placeholder="Paste agreement wording here..."
+                placeholderTextColor="#8b96a7"
+                editable={!busy}
+              />
+            </View>
+
+            <Pressable
+              style={[styles.secondary, consent && styles.consentActive]}
+              onPress={() => setConsent((current) => !current)}
+              disabled={busy}
+            >
+              <Text style={styles.secondaryText}>
+                {consent
+                  ? "✓ Confirmed: send text for analysis"
+                  : "Confirm sending text for analysis"}
+              </Text>
+            </Pressable>
+
+            <Pressable
+              style={[styles.button, busy && styles.disabled]}
+              onPress={analyzeAgreement}
+              disabled={busy}
+            >
+              <Text style={styles.buttonText}>
+                {busy ? "Analyzing..." : "Analyze agreement"}
+              </Text>
+            </Pressable>
+
+            {!!analysis && (
+              <View style={styles.analysis}>
+                <Text style={styles.heading}>Analysis results</Text>
+                <Text selectable style={styles.analysisText}>
+                  {analysis}
+                </Text>
+                <Text style={styles.help}>
+                  Educational information only, not legal advice. Confirm
+                  payment procedures and loan terms with your lender.
+                </Text>
+              </View>
+            )}
+          </View>
+        )}
+
+        <View style={styles.card}>
+          <Text style={styles.heading}>Your data and backups</Text>
           <Text style={styles.help}>
-            Avoid making changes until you have checked whether your saved data
-            is intact.
+            Your financial records are stored locally on this device. Export
+            a backup using the web version before uninstalling or replacing
+            the app. This version does not automatically sync to a bank or
+            another device.
           </Text>
+          <Pressable style={styles.secondary} onPress={exportBackup}>
+            <Text style={styles.secondaryText}>Export JSON backup (web)</Text>
+          </Pressable>
         </View>
-      )}
 
-      <Text style={styles.footer}>
-        Estimates are not guarantees. This app does not move money or connect
-        to your bank. Verify your balances and lender terms independently.
-      </Text>
-    </ScrollView>
+        <Text style={styles.footer}>
+          Estimates are not guarantees. This app does not move money or connect
+          to your bank. Verify balances, APRs, and lender terms independently.
+        </Text>
+      </ScrollView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  page: { flex: 1, backgroundColor: "#f2f5f9" },
+  page: {
+    flex: 1,
+    backgroundColor: "#f1f5f9",
+  },
+  scroll: {
+    flex: 1,
+  },
   container: {
     width: "100%",
     maxWidth: 760,
     alignSelf: "center",
     padding: 18,
-    paddingBottom: 50,
+    paddingBottom: 48,
+  },
+  loading: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 24,
+    backgroundColor: "#f1f5f9",
+  },
+  header: {
+    marginTop: 12,
+    marginBottom: 16,
+  },
+  brand: {
+    fontWeight: "900",
+    color: "#137653",
+    letterSpacing: 1.5,
+    marginBottom: 8,
   },
   eyebrow: {
     color: "#137653",
-    fontWeight: "800",
+    fontWeight: "900",
     letterSpacing: 2,
-    marginTop: 12,
+    fontSize: 11,
   },
   title: {
     fontSize: 29,
@@ -877,7 +1249,12 @@ const styles = StyleSheet.create({
     color: "#152238",
     marginTop: 8,
   },
-  subtitle: { fontSize: 15, marginVertical: 14, color: "#59677a" },
+  subtitle: {
+    fontSize: 15,
+    marginTop: 8,
+    color: "#59677a",
+    lineHeight: 22,
+  },
   nav: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -885,47 +1262,119 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   navItem: {
-    paddingVertical: 10,
-    paddingHorizontal: 12,
+    paddingVertical: 11,
+    paddingHorizontal: 13,
     backgroundColor: "#e2e8f0",
     borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "transparent",
   },
-  navText: { fontWeight: "700", color: "#334155", fontSize: 12 },
-  active: { backgroundColor: "#c9ead9", borderColor: "#137653" },
-  activeText: { color: "#105e42" },
+  navItemActive: {
+    backgroundColor: "#c9ead9",
+    borderColor: "#137653",
+  },
+  navText: {
+    fontWeight: "800",
+    color: "#334155",
+    fontSize: 12,
+  },
+  navTextActive: {
+    color: "#105e42",
+  },
   hero: {
     backgroundColor: "#123c32",
     padding: 22,
     borderRadius: 18,
     marginBottom: 16,
   },
-  heroLabel: { color: "#c5f2dc", fontWeight: "800", fontSize: 12 },
-  heroAmount: { color: "#fff", fontSize: 34, fontWeight: "900", marginTop: 8 },
-  heroNote: { color: "#d9e9e3", marginTop: 8, lineHeight: 20 },
+  heroLabel: {
+    color: "#c5f2dc",
+    fontWeight: "900",
+    fontSize: 12,
+    letterSpacing: 1,
+  },
+  heroAmount: {
+    color: "#ffffff",
+    fontSize: 34,
+    fontWeight: "900",
+    marginTop: 8,
+  },
+  heroNote: {
+    color: "#d9e9e3",
+    marginTop: 8,
+    lineHeight: 21,
+  },
+  statsGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+    marginBottom: 6,
+  },
+  statCard: {
+    width: "48%",
+    flexGrow: 1,
+    flexBasis: 140,
+    backgroundColor: "#ffffff",
+    padding: 15,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    marginBottom: 8,
+  },
+  statLabel: {
+    color: "#536174",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  statValue: {
+    fontWeight: "900",
+    color: "#172033",
+    textAlign: "right",
+    fontSize: 15,
+    flexShrink: 1,
+  },
   card: {
-    backgroundColor: "#fff",
+    backgroundColor: "#ffffff",
     borderRadius: 16,
     padding: 17,
     marginBottom: 16,
     borderWidth: 1,
     borderColor: "#e2e8f0",
   },
-  heading: { fontSize: 19, fontWeight: "900", color: "#152238", marginBottom: 12 },
-  bigNumber: { fontSize: 27, fontWeight: "900", marginBottom: 8, color: "#152238" },
-  metric: { fontSize: 18, fontWeight: "800", marginTop: 12, marginBottom: 8 },
-  label: { fontWeight: "700", marginBottom: 6, color: "#344054" },
-  field: { marginTop: 12, marginBottom: 4 },
+  heading: {
+    fontSize: 19,
+    fontWeight: "900",
+    color: "#152238",
+    marginBottom: 12,
+  },
+  label: {
+    fontWeight: "800",
+    marginBottom: 6,
+    color: "#344054",
+  },
+  field: {
+    marginTop: 12,
+    marginBottom: 4,
+  },
   input: {
     borderWidth: 1,
     borderColor: "#cfd8e3",
     borderRadius: 10,
     padding: 12,
-    backgroundColor: "#fff",
+    backgroundColor: "#ffffff",
     color: "#172033",
     fontSize: 16,
   },
-  multiline: { minHeight: 180, textAlignVertical: "top" },
-  row: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginVertical: 10 },
+  multiline: {
+    minHeight: 180,
+    textAlignVertical: "top",
+  },
+  row: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginVertical: 10,
+  },
   tab: {
     flex: 1,
     minWidth: 85,
@@ -937,6 +1386,17 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "transparent",
   },
+  tabActive: {
+    backgroundColor: "#c9ead9",
+    borderColor: "#137653",
+  },
+  tabText: {
+    fontWeight: "800",
+    color: "#334155",
+  },
+  tabTextActive: {
+    color: "#105e42",
+  },
   button: {
     backgroundColor: "#137653",
     padding: 14,
@@ -944,7 +1404,11 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginTop: 14,
   },
-  buttonText: { color: "#fff", fontWeight: "800", fontSize: 16 },
+  buttonText: {
+    color: "#ffffff",
+    fontWeight: "900",
+    fontSize: 15,
+  },
   secondary: {
     backgroundColor: "#e6f3ec",
     padding: 12,
@@ -952,27 +1416,17 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginTop: 12,
   },
-  secondaryText: { color: "#126344", fontWeight: "800" },
-  warning: {
-    backgroundColor: "#fff4df",
-    borderColor: "#efd49b",
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 14,
-    marginBottom: 16,
+  secondaryText: {
+    color: "#126344",
+    fontWeight: "900",
+    textAlign: "center",
   },
-  help: { color: "#687386", lineHeight: 20, marginTop: 7, fontSize: 13 },
-  statRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    paddingVertical: 10, 18 
-    borderBottomWidth: 1,
-    borderBottomColor: "#edf0f4",
-    gap: 12,
+  help: {
+    color: "#687386",
+    lineHeight: 20,
+    marginTop: 7,
+    fontSize: 13,
   },
-  statLabel: { color: "#536174", flex: 1 },
-  statValue: { fontWeight: "800", color: "#172033", textAlign: "right" },
   listRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -982,7 +1436,21 @@ const styles = StyleSheet.create({
     borderBottomColor: "#e7ebf1",
     gap: 12,
   },
-  itemTitle: { fontWeight: "800", color: "#172033", fontSize: 15 },
+  flex: {
+    flex: 1,
+    minWidth: 0,
+  },
+  itemTitle: {
+    fontWeight: "800",
+    color: "#172033",
+    fontSize: 15,
+  },
+  debtBalance: {
+    color: "#152238",
+    fontWeight: "900",
+    fontSize: 18,
+    marginTop: 5,
+  },
   choice: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -992,13 +1460,87 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#d6dce5",
     borderRadius: 10,
+    gap: 12,
   },
-  choiceActive: { backgroundColor: "#e6f3ec", borderColor: "#137653" },
-  positive: { color: "#137653" },
-  negative: { color: "#9b3434" },
-  link: { color: "#137653", fontWeight: "800" },
-  analysis: { marginTop: 18, padding: 14, borderRadius: 12, backgroundColor: "#f3f8f5" },
-  disabled: { opacity: 0.5 },
+  choiceActive: {
+    backgroundColor: "#e6f3ec",
+    borderColor: "#137653",
+  },
+  spacedLabel: {
+    marginTop: 14,
+  },
+  metric: {
+    fontSize: 18,
+    fontWeight: "900",
+    marginTop: 12,
+    marginBottom: 8,
+    color: "#152238",
+  },
+  resultPanel: {
+    backgroundColor: "#f1f7f3",
+    padding: 15,
+    borderRadius: 12,
+    marginTop: 14,
+    gap: 6,
+  },
+  resultNumber: {
+    color: "#105e42",
+    fontSize: 21,
+    fontWeight: "900",
+    marginBottom: 10,
+  },
+  positive: {
+    color: "#137653",
+  },
+  negative: {
+    color: "#9b3434",
+  },
+  deleteAction: {
+    alignSelf: "flex-start",
+    marginTop: 8,
+    paddingVertical: 4,
+    paddingRight: 8,
+  },
+  deleteText: {
+    color: "#a12b2b",
+    fontWeight: "800",
+    fontSize: 12,
+  },
+  warning: {
+    backgroundColor: "#fff4df",
+    borderColor: "#efd49b",
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 16,
+  },
+  warningTitle: {
+    color: "#80551b",
+    fontWeight: "900",
+    fontSize: 15,
+  },
+  errorText: {
+    color: "#a12b2b",
+    marginTop: 5,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  consentActive: {
+    backgroundColor: "#c9ead9",
+  },
+  analysis: {
+    marginTop: 18,
+    padding: 14,
+    borderRadius: 12,
+    backgroundColor: "#f3f8f5",
+  },
+  analysisText: {
+    color: "#243044",
+    lineHeight: 22,
+  },
+  disabled: {
+    opacity: 0.5,
+  },
   footer: {
     color: "#687386",
     textAlign: "center",
