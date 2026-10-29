@@ -1,3 +1,4 @@
+
 name: Build Android APK
 
 on:
@@ -6,9 +7,14 @@ on:
     paths:
       - "App.tsx"
       - "app.json"
+      - "app.config.js"
+      - "app.config.ts"
       - "package.json"
       - "package-lock.json"
+      - "babel.config.js"
+      - "metro.config.js"
       - "src/**"
+      - "assets/**"
       - ".github/workflows/build-android-apk.yml"
 
 permissions:
@@ -27,6 +33,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: npm
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -37,19 +44,27 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Generate Android project
-        run: npx expo prebuild --platform android --no-install --non-interactive
+      - name: Verify Expo configuration
+        run: npx expo config --type public
 
-      - name: Build Android APK
+      - name: Generate Android project
+        run: npx expo prebuild --platform android --clean --no-install --non-interactive
+
+      - name: Build release APK with JavaScript bundle
         working-directory: android
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug
+          ./gradlew assembleRelease
 
-      - name: Save APK for download
+      - name: Verify APK exists
+        run: |
+          test -f android/app/build/outputs/apk/release/app-release.apk
+          ls -lh android/app/build/outputs/apk/release/app-release.apk
+
+      - name: Upload installable APK
         uses: actions/upload-artifact@v4
         with:
           name: debt-payoff-android-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          path: android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
           retention-days: 14
